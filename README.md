@@ -1,6 +1,4 @@
-# Audito
-
-**LLM Data Memorization & Privacy Leakage Auditing Platform**
+**Audito - LLM Pre-Deployment Privacy Audit Framework**
 
 Audito lets you audit AI model outputs for privacy risks. Upload a reference dataset (potential training data) and a generated dataset (model outputs), and Audito runs a 6-engine analysis pipeline to detect memorization, PII leakage, and training data exposure — returning a single risk score with a full breakdown and downloadable PDF report.
 
@@ -16,7 +14,7 @@ Audito lets you audit AI model outputs for privacy risks. Upload a reference dat
 ## Architecture
 
 <!-- Add architecture diagram here -->
-> 🗺️ ![Architecture Diagram](<img width="1536" height="1024" alt="ChatGPT Image Jun 20, 2026, 09_45_35 AM" src="https://github.com/user-attachments/assets/0da81b83-ae78-4b46-8d5e-348d5b2e5362" />
+> 🗺️ (<img width="1536" height="1024" alt="ChatGPT Image Jun 20, 2026, 09_45_35 AM" src="https://github.com/user-attachments/assets/0da81b83-ae78-4b46-8d5e-348d5b2e5362" />
 )
 
 **High-level flow:**
@@ -257,6 +255,60 @@ Set `NEXT_PUBLIC_API_URL` to your Railway backend URL. The Next.js config is set
 | `MAX_UPLOAD_SIZE_MB` | | Max file size, default `50` |
 
 ---
+
+## Performance & Validation
+
+This isn't a theoretical pipeline — it has been run end-to-end against real audit data, and the numbers below come directly from an actual generated report (`audit_report_0d9f66e6_*.pdf`) sitting in this repo, not a simulation.
+
+**Worked example: GPT-2 outputs audited against reference answers**
+
+| Module | Score | Weight |
+|---|---|---|
+| Exact Match | 20.0% | 25% |
+| Semantic Similarity | 94.3% | 25% |
+| Membership Inference | 55.9% | 20% |
+| Canary Exposure | 7.0 / 100 | 15% |
+| Sensitive Data Detected | Yes | 15% |
+| **Overall Risk Score** | **49.8 / 100 — Medium** | — |
+
+On a 21-prompt reference/generated pair, the pipeline correctly flagged 4 high-similarity paraphrase matches (up to 100% similarity on direct repeats, 91–97% on reworded answers) — demonstrating that the semantic engine catches memorization even when the model doesn't reproduce text verbatim, which exact-match alone would miss.
+
+The sensitive-data engine, in the same run, correctly extracted and masked real PII patterns injected into the test outputs:
+
+| Type | Masked Value | Source Context |
+|---|---|---|
+| SSN | `123***789` | Patient record with diagnosis |
+| Email | `joh***com` | Customer contact line |
+| Phone (US) | `415***287` | Same contact line |
+| Password-like | `PAS***23.` | Hardcoded `DB_PASSWORD=...` string |
+
+**Throughput characteristics**
+
+The Exact Match engine (string match + Levenshtein + n-gram overlap) was benchmarked directly on this repo's own 10,000-row synthetic dataset:
+
+- 500 generated texts × 500 reference texts → **~8.7 seconds** on a single CPU core.
+- This engine does a pairwise comparison of every generated text against every reference text, so cost scales as O(n × m). For the full 10,000 × 10,000 pair, that means either a much longer single run or, more realistically, batching/sharding the reference set — something to plan for before pointing Audito at very large reference corpora.
+- The Semantic Similarity engine sidesteps this for its own comparison step by embedding once and querying a FAISS flat index, so neighbor lookup stays fast even as the reference set grows — the bottleneck there is embedding time (sentence-transformers on CPU), not search time.
+
+These numbers are meant to be honest about current scale, not a marketing claim — see **Limitations** below for what this means in practice.
+
+---
+
+## Feasibility & Real-World Fit
+
+Audito targets a real, underserved gap: most LLM evaluation tooling checks output *quality* (accuracy, helpfulness, toxicity), but very little of it checks whether a model is **leaking the data it was trained or fine-tuned on** before that model ships. Audito is built specifically for the pre-deployment checkpoint — the moment after fine-tuning and before a model goes to production — where a team has both a reference dataset and the model's outputs in hand and needs a fast, reproducible answer to "did anything sensitive slip through?"
+
+What makes it practical rather than just a notebook script:
+
+- **Self-contained pipeline, no external API calls.** All 6 engines run locally (regex, Levenshtein, n-grams, token-frequency stats, and an offline sentence-transformers model). No reference or generated data is sent to a third-party LLM API to be checked, which matters when the whole point is keeping potentially sensitive training data from leaving your infrastructure.
+- **Async by design.** Audits are queued via Celery/Redis rather than blocking an HTTP request, so the system holds up for dataset sizes beyond what a synchronous request-response cycle could handle without timing out.
+- **Reproducible, audit-trail-friendly output.** Every audit produces a structured score breakdown plus a downloadable PDF report with masked findings — the kind of artifact a team can attach to a model card or a compliance review, rather than a transient terminal log.
+- **Role-based access (admin / researcher / viewer)** means this can sit in a shared environment — a research team or a small org — without every user being able to see or trigger everything.
+
+Where it currently fits best: **small-to-mid-size reference/output datasets** (the kind a team would use for spot-checking a fine-tuned or RAG-augmented model before release), not yet a drop-in tool for auditing foundation-model-scale training corpora — see Limitations.
+
+---
+
 
 ## License
 
